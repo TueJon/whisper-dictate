@@ -19,11 +19,15 @@ mkdir -p "$RUNDIR"
 WAV="$RUNDIR/rec.wav"
 PIDFILE="$RUNDIR/rec.pid"
 LOCK="$RUNDIR/state.lock"
+STATE="$RUNDIR/state"          # one word, read by whisper-dictate-indicator
 
 SND="/usr/share/sounds/freedesktop/stereo"
 notify() { notify-send -a "Whisper Dictate" -t "${2:-3000}" "🎙 Whisper Dictate" "$1" >/dev/null 2>&1 || true; }
 # 9>&- : never let the backgrounded player inherit (and pin) the lock fd.
 play()   { [ -f "$1" ] && (paplay "$1" >/dev/null 2>&1 9>&- &) ; }
+# Publish UI state (idle|recording|transcribing) for the top-bar
+# indicator. Atomic rename so the poller never reads a partial file.
+state_set() { printf '%s' "$1" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null || true; }
 
 # Serialize presses. CRITICAL: bash fds opened with `exec N>` are NOT
 # close-on-exec, so any backgrounded/daemonizing child (ffmpeg recorder,
@@ -38,6 +42,9 @@ fi
 
 if [ -f "$PIDFILE" ]; then
     # ---------- STOP: finalize, transcribe, paste ----------
+    # Clear the indicator on every exit path from here (success,
+    # "nothing recognized", failure, paste-fail, ^C).
+    trap 'state_set idle' EXIT
     rec_pid="$(cat "$PIDFILE")"; rm -f "$PIDFILE"
     # Stop the recorder, escalating so it can never become a runaway:
     # SIGINT -> ffmpeg writes a clean WAV trailer; then TERM, then KILL.
@@ -57,8 +64,8 @@ if [ -f "$PIDFILE" ]; then
         fi
     done
 
+    state_set transcribing
     play "$SND/window-attention.oga"
-    notify "Transcribing…" 120000
 
     if [ ! -s "$WAV" ]; then
         notify "No audio captured (recorder didn't start?) — press Ctrl+Alt+D to try again."
@@ -103,6 +110,6 @@ else
     ffmpeg -hide_banner -loglevel error -nostdin \
         -f pulse -i default -ac 1 -ar 16000 "$WAV" </dev/null >/dev/null 2>&1 9>&- &
     echo $! > "$PIDFILE"
+    state_set recording
     play "$SND/bell.oga"
-    notify "● Recording — press Ctrl+Alt+D again to stop & paste" 120000
 fi

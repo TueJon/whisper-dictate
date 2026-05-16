@@ -111,4 +111,36 @@ else
     warn "Not a GNOME session — bind $BIN_DIR/whisper-dictate to a key yourself."
 fi
 
+# 6) Top-bar status indicator -------------------------------------------
+say "Installing top-bar indicator"
+install -m 0755 "$REPO_DIR/bin/whisper-dictate-indicator" "$BIN_DIR/whisper-dictate-indicator"
+
+# The indicator needs an AppIndicator/SNI GNOME extension to be visible.
+if command -v gnome-extensions >/dev/null; then
+    for ext in ubuntu-appindicators@ubuntu.com appindicatorsupport@rgcjonas.gmail.com; do
+        if gnome-extensions list 2>/dev/null | grep -qx "$ext"; then
+            gnome-extensions enable "$ext" 2>/dev/null \
+                && say "Enabled GNOME extension: $ext" && break
+        fi
+    done
+    gnome-extensions list --enabled 2>/dev/null | grep -qiE 'appindicator' \
+        || warn "No AppIndicator extension active — the top-bar icon won't show. Install 'gnome-shell-extension-appindicator' and enable it."
+fi
+
+# Autostart on login.
+AUTO="$HOME/.config/autostart/whisper-dictate-indicator.desktop"
+mkdir -p "$(dirname "$AUTO")"
+cat > "$AUTO" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Whisper Dictate Indicator
+Comment=Top-bar recording/transcribing status for whisper-dictate
+Exec=$BIN_DIR/whisper-dictate-indicator
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+EOF
+
+# Start it now (single-instance guarded, so this is safe to repeat).
+setsid -f "$BIN_DIR/whisper-dictate-indicator" >/dev/null 2>&1 || true
+
 say "Done. Make sure $BIN_DIR is on your PATH, then press the shortcut to dictate."

@@ -10,6 +10,8 @@ wherever the cursor is. Built for **GNOME on Wayland** (works in terminals too).
 - GPU (NVIDIA/CUDA) with automatic CPU fallback.
 - Pastes via the clipboard so it is **keyboard-layout independent**
   (works with the Austrian QWERTZ layout, umlauts, etc.).
+- A **top-bar indicator** shows “● REC” / “⏳ …” while recording and
+  transcribing, and hides itself when idle.
 
 ## Requirements
 
@@ -17,6 +19,8 @@ wherever the cursor is. Built for **GNOME on Wayland** (works in terminals too).
 - Python 3.10+.
 - A microphone (PipeWire/PulseAudio default source is used).
 - Write access to `/dev/uinput` (for synthesizing the paste keystroke).
+- For the top-bar indicator: an AppIndicator/SNI GNOME extension enabled
+  (on Ubuntu `ubuntu-appindicators@ubuntu.com`; the installer enables it).
 - Optional: an NVIDIA GPU + driver for fast transcription. Without one it
   falls back to CPU automatically.
 
@@ -58,13 +62,21 @@ Tunables (env vars; set them in `~/.local/bin/whisper-dictate`):
 ```
 Ctrl+Alt+D ──> whisper-dictate (toggle)
   press 1:  ffmpeg records the default mic -> /run/user/$UID/whisper-dictate/rec.wav
-  press 2:  stop ffmpeg -> transcribe.py (faster-whisper, GPU) -> text
+            writes state "recording"
+  press 2:  stop ffmpeg -> state "transcribing" -> transcribe.py
+            (faster-whisper, GPU) -> text
             -> wl-copy (clipboard + primary) -> ydotool Shift+Insert
+            -> state "idle"  (cleared on every exit path via trap)
+
+whisper-dictate-indicator (autostarted daemon)
+  polls the state file every 250 ms and shows / hides the top-bar icon
 ```
 
 State and the recording live in `$XDG_RUNTIME_DIR/whisper-dictate/`
-(tmpfs; the audio is deleted right after transcription). The last run's
-stderr is in `~/.local/share/whisper-dictate/last-run.log`.
+(tmpfs; the audio is deleted right after transcription). The indicator
+is decoupled — it only reads the state file, so the wrapper never
+blocks on it and either part can be restarted independently. The last
+run's stderr is in `~/.local/share/whisper-dictate/last-run.log`.
 
 ### Design notes (non-obvious decisions)
 
@@ -91,6 +103,15 @@ stderr is in `~/.local/share/whisper-dictate/last-run.log`.
   GNOME-spawned script has no controlling tty, so a plain `&` already
   lets `ffmpeg` outlive the script; STOP escalates SIGINT→TERM→KILL and
   sweeps strays so a recorder can never run away.
+- **Indicator is a separate polling daemon, not driven by the wrapper.**
+  A persistent panel item needs a long-lived process with a GLib loop;
+  the short-lived toggle script can't host one. Coupling them (signals/
+  socket) would risk wedging the hot paste path, so the wrapper only
+  writes a one-word state file and the daemon polls it (250 ms). GNOME
+  Wayland has no client window positioning and Mutter implements no
+  layer-shell, so an overlay window is out — an AppIndicator/SNI tray
+  item (via the GNOME extension) is the only robust top-bar option, and
+  it needs no logout once the extension is active.
 
 ## Latency
 
@@ -109,11 +130,18 @@ server that stays warm in VRAM (not included here).
   driver/CUDA. `WD_DEVICE=cpu` forces CPU.
 - **Hallucinated text on silence** (e.g. “das ist ein Test”): a known
   Whisper trait on near-silence; harmless when you actually speak.
+- **No top-bar icon:** the AppIndicator extension isn't active. Check
+  `gnome-extensions list --enabled | grep -i appindicator`; enable it
+  with `gnome-extensions enable ubuntu-appindicators@ubuntu.com`. Check
+  the daemon runs: `pgrep -af whisper-dictate-indicator`.
 
 ## Uninstall
 
 ```bash
-rm -rf ~/.local/share/whisper-dictate ~/.local/bin/whisper-dictate
+rm -f  ~/.local/bin/whisper-dictate ~/.local/bin/whisper-dictate-indicator
+rm -f  ~/.config/autostart/whisper-dictate-indicator.desktop
+rm -rf ~/.local/share/whisper-dictate
+pkill -f whisper-dictate-indicator
 # then remove the "Whisper Dictate" entry in
 # Settings → Keyboard → Keyboard Shortcuts
 ```

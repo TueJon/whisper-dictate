@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Top-bar status indicator for whisper-dictate.
+
+Shows a tray icon in the GNOME top bar while recording / transcribing
+and hides itself when idle. It just polls the one-word state file that
+the `whisper-dictate` wrapper writes — no IPC, no dependency on it.
+
+Requires the AppIndicator/KStatusNotifier GNOME extension to be enabled
+(on Ubuntu: `ubuntu-appindicators@ubuntu.com`).
+"""
+import fcntl
+import os
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppInd
+except (ValueError, ImportError):
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3 as AppInd
+from gi.repository import GLib, Gtk
+
+RUNDIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "whisper-dictate")
+STATE = os.path.join(RUNDIR, "state")
+os.makedirs(RUNDIR, exist_ok=True)
+
+# Single instance — a second copy (e.g. autostart + manual) just exits.
+_lock = open(os.path.join(RUNDIR, "indicator.lock"), "w")
+try:
+    fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(0)
+
+# state -> (themed icon name, panel label)
+VIEW = {
+    "recording":    ("audio-input-microphone-symbolic", " ● REC"),
+    "transcribing": ("content-loading-symbolic",        " ⏳ …"),
+}
+
+ind = AppInd.Indicator.new(
+    "whisper-dictate",
+    "audio-input-microphone-symbolic",
+    AppInd.IndicatorCategory.APPLICATION_STATUS,
+)
+menu = Gtk.Menu()
+hdr = Gtk.MenuItem(label="Whisper Dictate")
+hdr.set_sensitive(False)
+menu.append(hdr)
+quit_item = Gtk.MenuItem(label="Quit indicator")
+quit_item.connect("activate", lambda *_: Gtk.main_quit())
+menu.append(quit_item)
+menu.show_all()
+ind.set_menu(menu)
+ind.set_status(AppInd.IndicatorStatus.PASSIVE)  # hidden while idle
+
+_last = object()  # sentinel so the first poll always applies
+
+
+def poll():
+    global _last
+    try:
+        with open(STATE) as fh:
+            state = fh.read().strip()
+    except OSError:
+        state = "idle"
+    if state != _last:
+        _last = state
+        if state in VIEW:
+            icon, label = VIEW[state]
+            ind.set_icon_full(icon, state)
+            ind.set_label(label, " ⏳ … ")
+            ind.set_status(AppInd.IndicatorStatus.ACTIVE)
+        else:  # idle / unknown -> hide
+            ind.set_label("", "")
+            ind.set_status(AppInd.IndicatorStatus.PASSIVE)
+    return True  # keep the GLib timeout alive
+
+
+GLib.timeout_add(250, poll)
+poll()
+Gtk.main()
