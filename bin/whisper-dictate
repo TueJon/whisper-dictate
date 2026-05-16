@@ -45,6 +45,11 @@ if [ -f "$PIDFILE" ]; then
     # Clear the indicator on every exit path from here (success,
     # "nothing recognized", failure, paste-fail, ^C).
     trap 'state_set idle' EXIT
+    # Instant feedback the moment the stop press registers — BEFORE the
+    # (up to ~1s) recorder shutdown and the slow transcription below — so
+    # pressing stop never feels like "nothing happened".
+    state_set transcribing
+    play "$SND/window-attention.oga"
     rec_pid="$(cat "$PIDFILE")"; rm -f "$PIDFILE"
     # Stop the recorder, escalating so it can never become a runaway:
     # SIGINT -> ffmpeg writes a clean WAV trailer; then TERM, then KILL.
@@ -63,9 +68,6 @@ if [ -f "$PIDFILE" ]; then
             kill -KILL "$_p" 2>/dev/null || true
         fi
     done
-
-    state_set transcribing
-    play "$SND/window-attention.oga"
 
     if [ ! -s "$WAV" ]; then
         notify "No audio captured (recorder didn't start?) — press Ctrl+Alt+D to try again."

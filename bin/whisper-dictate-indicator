@@ -36,8 +36,8 @@ except OSError:
 
 # state -> (themed icon name, panel label)
 VIEW = {
-    "recording":    ("audio-input-microphone-symbolic", " ● REC"),
-    "transcribing": ("content-loading-symbolic",        " ⏳ …"),
+    "recording":    ("media-record-symbolic",    " Recording"),
+    "transcribing": ("content-loading-symbolic", " Transcribing…"),
 }
 
 ind = AppInd.Indicator.new(
@@ -71,7 +71,7 @@ def poll():
         if state in VIEW:
             icon, label = VIEW[state]
             ind.set_icon_full(icon, state)
-            ind.set_label(label, " ⏳ … ")
+            ind.set_label(label, " Transcribing… ")
             ind.set_status(AppInd.IndicatorStatus.ACTIVE)
         else:  # idle / unknown -> hide
             ind.set_label("", "")
