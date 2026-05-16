@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Toggle voice dictation: 1st press = start recording, 2nd press = stop,
+# transcribe with Whisper, and paste at the cursor (Wayland/GNOME).
+set -euo pipefail
+
+WD_HOME="$HOME/.local/share/whisper-dictate"
+VENV_PY="$WD_HOME/venv/bin/python"
+TR_SCRIPT="$WD_HOME/transcribe.py"
+LOG="$WD_HOME/last-run.log"
+
+# ctranslate2 4.x dlopen()s cuDNN/cuBLAS at model-load time but does not
+# add the pip-installed NVIDIA wheels to the search path itself — point
+# the loader at the venv-bundled libs so the GPU path works.
+_nvlibs="$(echo "$WD_HOME"/venv/lib/python*/site-packages/nvidia/*/lib | tr ' ' ':')"
+export LD_LIBRARY_PATH="${_nvlibs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/whisper-dictate"
+mkdir -p "$RUNDIR"
+WAV="$RUNDIR/rec.wav"
+PIDFILE="$RUNDIR/rec.pid"
+LOCK="$RUNDIR/state.lock"
+
+SND="/usr/share/sounds/freedesktop/stereo"
+notify() { notify-send -a "Whisper Dictate" -t "${2:-3000}" "🎙 Whisper Dictate" "$1" >/dev/null 2>&1 || true; }
+# 9>&- : never let the backgrounded player inherit (and pin) the lock fd.
+play()   { [ -f "$1" ] && (paplay "$1" >/dev/null 2>&1 9>&- &) ; }
+
+# Serialize presses. CRITICAL: bash fds opened with `exec N>` are NOT
+# close-on-exec, so any backgrounded/daemonizing child (ffmpeg recorder,
+# wl-copy, paplay) would inherit fd 9 and keep the flock held long after
+# this script exits — wedging every later press as "busy". Every such
+# spawn below therefore closes fd 9 explicitly with `9>&-`.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    notify "Busy — still transcribing the previous clip."
+    exit 0
+fi
+
+if [ -f "$PIDFILE" ]; then
+    # ---------- STOP: finalize, transcribe, paste ----------
+    rec_pid="$(cat "$PIDFILE")"; rm -f "$PIDFILE"
+    # Stop the recorder, escalating so it can never become a runaway:
+    # SIGINT -> ffmpeg writes a clean WAV trailer; then TERM, then KILL.
+    kill -INT "$rec_pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$rec_pid" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$rec_pid" 2>/dev/null; then
+        kill -TERM "$rec_pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 "$rec_pid" 2>/dev/null || break; sleep 0.1; done
+        kill -KILL "$rec_pid" 2>/dev/null || true
+    fi
+    # Safety net: reap any other ffmpeg still recording into our WAV
+    # (e.g. left over from an older buggy run) so none can run away.
+    for _p in $(pgrep -x ffmpeg 2>/dev/null); do
+        [ "$_p" = "$rec_pid" ] && continue
+        if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q "$WAV"; then
+            kill -KILL "$_p" 2>/dev/null || true
+        fi
+    done
+
+    play "$SND/window-attention.oga"
+    notify "Transcribing…" 120000
+
+    if [ ! -s "$WAV" ]; then
+        notify "No audio captured (recorder didn't start?) — press Ctrl+Alt+D to try again."
+        exit 0
+    fi
+
+    if ! text="$("$VENV_PY" "$TR_SCRIPT" "$WAV" 2>"$LOG")"; then
+        rm -f "$WAV"
+        notify "Transcription failed — see $LOG"
+        exit 1
+    fi
+    rm -f "$WAV"   # don't leave captured audio sitting in tmpfs
+    if [ -z "$text" ]; then notify "Nothing recognized."; exit 0; fi
+
+    # Put the text on BOTH the clipboard and the primary selection so one
+    # keystroke pastes everywhere: VTE terminals (gnome-terminal, ptyxis)
+    # paste PRIMARY on Shift+Insert, while GTK/Qt/LibreOffice/JetBrains
+    # paste CLIPBOARD on it. wl-copy self-daemonizes, so 9>&- stops those
+    # daemons from pinning the lock fd.
+    printf '%s' "$text" | wl-copy 9>&-
+    printf '%s' "$text" | wl-copy --primary 9>&-
+    sleep 0.2
+    # Shift+Insert is the most universal, keyboard-layout-independent
+    # paste key and the only one that also works in terminals (Ctrl+V
+    # does not). Override with WD_PASTE_KEY if ever needed.
+    # --delay 300: daemonless ydotool 0.1.8 needs the freshly-created
+    # virtual input device to be enumerated by Mutter first.
+    if ! ydotool key --delay 300 "${WD_PASTE_KEY:-shift+insert}" 2>>"$LOG"; then
+        notify "On clipboard — press your paste shortcut (auto-paste failed, see $LOG)"
+        exit 0
+    fi
+    play "$SND/complete.oga"
+    notify "✓ ${text:0:80}"
+else
+    # ---------- START: begin recording ----------
+    rm -f "$WAV"
+    # NO setsid: under job control `setsid` may fork, so $! would capture
+    # the short-lived setsid PID instead of ffmpeg's and the recorder
+    # could never be stopped. A GNOME-spawned script has no controlling
+    # tty, so a plain `&` already lets ffmpeg outlive this script.
+    # 9>&- so ffmpeg does not inherit (and pin) the lock fd.
+    ffmpeg -hide_banner -loglevel error -nostdin \
+        -f pulse -i default -ac 1 -ar 16000 "$WAV" </dev/null >/dev/null 2>&1 9>&- &
+    echo $! > "$PIDFILE"
+    play "$SND/bell.oga"
+    notify "● Recording — press Ctrl+Alt+D again to stop & paste" 120000
+fi

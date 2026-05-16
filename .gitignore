@@ -1,0 +1,7 @@
+# Nothing machine-specific lives in the repo, but just in case:
+venv/
+__pycache__/
+*.pyc
+*.wav
+last-run.log
+.DS_Store
