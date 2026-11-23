@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Toggle voice dictation: 1st press = start recording, 2nd press = stop,
-# transcribe with Whisper, and paste at the cursor (Wayland/GNOME).
+# transcribe, and paste at the cursor (Wayland or X11).
 set -euo pipefail
 
 WD_HOME="$HOME/.local/share/whisper-dictate"
@@ -8,14 +8,34 @@ VENV_PY="$WD_HOME/venv/bin/python"
 TR_SCRIPT="$WD_HOME/transcribe.py"
 LOG="$WD_HOME/last-run.log"
 
+if [[ -f "$WD_HOME/local-cpu" ]]; then
+    export WD_MODEL="${WD_MODEL:-small}"
+    export WD_DEVICE="${WD_DEVICE:-cpu}"
+    export WD_COMPUTE="${WD_COMPUTE:-int8}"
+fi
+
+if [[ "${1:-}" == --configure || "${1:-}" == --help ]]; then
+    exec "$VENV_PY" "$TR_SCRIPT" "$@"
+fi
+
 # ctranslate2 4.x dlopen()s cuDNN/cuBLAS at model-load time but does not
 # add the pip-installed NVIDIA wheels to the search path itself — point
 # the loader at the venv-bundled libs so the GPU path works.
 _nvlibs="$(echo "$WD_HOME"/venv/lib/python*/site-packages/nvidia/*/lib | tr ' ' ':')"
 export LD_LIBRARY_PATH="${_nvlibs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/whisper-dictate"
+umask 077
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    RUNDIR="$XDG_RUNTIME_DIR/whisper-dictate"
+else
+    RUNDIR="/tmp/whisper-dictate-$(id -u)"
+fi
 mkdir -p "$RUNDIR"
+if [[ ! -O "$RUNDIR" || -L "$RUNDIR" ]]; then
+    printf 'Whisper Dictate runtime directory is unsafe: %s\n' "$RUNDIR" >&2
+    exit 1
+fi
+chmod 700 "$RUNDIR"
 WAV="$RUNDIR/rec.wav"
 PIDFILE="$RUNDIR/rec.pid"
 LOCK="$RUNDIR/state.lock"
@@ -24,10 +44,23 @@ STATE="$RUNDIR/state"          # one word, read by whisper-dictate-indicator
 SND="/usr/share/sounds/freedesktop/stereo"
 notify() { notify-send -a "Whisper Dictate" -t "${2:-3000}" "🎙 Whisper Dictate" "$1" >/dev/null 2>&1 || true; }
 # 9>&- : never let the backgrounded player inherit (and pin) the lock fd.
-play()   { [ -f "$1" ] && (paplay "$1" >/dev/null 2>&1 9>&- &) ; }
+play() {
+    if [[ -f "$1" ]]; then
+        paplay "$1" >/dev/null 2>&1 9>&- &
+    fi
+}
 # Publish UI state (idle|recording|transcribing) for the top-bar
 # indicator. Atomic rename so the poller never reads a partial file.
 state_set() { printf '%s' "$1" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null || true; }
+
+# A stale PID or a zombie must not keep stop waiting or receive a signal.
+recorder_running() {
+    local pid="$1"
+    local -a args=()
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -O "/proc/$pid" ]] || return 1
+    mapfile -d '' -t args 2>/dev/null < "/proc/$pid/cmdline" || return 1
+    [[ ${#args[@]} -gt 1 && "${args[0]##*/}" == ffmpeg && "${args[-1]}" == "$WAV" ]]
+}
 
 # Serialize presses. CRITICAL: bash fds opened with `exec N>` are NOT
 # close-on-exec, so any backgrounded/daemonizing child (ffmpeg recorder,
@@ -53,18 +86,21 @@ if [ -f "$PIDFILE" ]; then
     rec_pid="$(cat "$PIDFILE")"; rm -f "$PIDFILE"
     # Stop the recorder, escalating so it can never become a runaway:
     # SIGINT -> ffmpeg writes a clean WAV trailer; then TERM, then KILL.
-    kill -INT "$rec_pid" 2>/dev/null || true
-    for _ in $(seq 1 50); do kill -0 "$rec_pid" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$rec_pid" 2>/dev/null; then
-        kill -TERM "$rec_pid" 2>/dev/null || true
-        for _ in $(seq 1 20); do kill -0 "$rec_pid" 2>/dev/null || break; sleep 0.1; done
-        kill -KILL "$rec_pid" 2>/dev/null || true
+    if recorder_running "$rec_pid"; then
+        kill -INT "$rec_pid" 2>/dev/null || true
+        for _ in $(seq 1 50); do recorder_running "$rec_pid" || break; sleep 0.1; done
+        if recorder_running "$rec_pid"; then
+            kill -TERM "$rec_pid" 2>/dev/null || true
+            for _ in $(seq 1 20); do recorder_running "$rec_pid" || break; sleep 0.1; done
+            if recorder_running "$rec_pid"; then
+                kill -KILL "$rec_pid" 2>/dev/null || true
+            fi
+        fi
     fi
-    # Safety net: reap any other ffmpeg still recording into our WAV
-    # (e.g. left over from an older buggy run) so none can run away.
+    # Reap a recorder left by an older run only when it owns this exact path.
     for _p in $(pgrep -x ffmpeg 2>/dev/null); do
         [ "$_p" = "$rec_pid" ] && continue
-        if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q "$WAV"; then
+        if recorder_running "$_p"; then
             kill -KILL "$_p" 2>/dev/null || true
         fi
     done
@@ -74,7 +110,7 @@ if [ -f "$PIDFILE" ]; then
         exit 0
     fi
 
-    if ! text="$("$VENV_PY" "$TR_SCRIPT" "$WAV" 2>"$LOG")"; then
+    if ! text="$(WD_DESKTOP=1 "$VENV_PY" "$TR_SCRIPT" "$WAV" 2>"$LOG")"; then
         rm -f "$WAV"
         notify "Transcription failed — see $LOG"
         exit 1
@@ -87,15 +123,24 @@ if [ -f "$PIDFILE" ]; then
     # paste PRIMARY on Shift+Insert, while GTK/Qt/LibreOffice/JetBrains
     # paste CLIPBOARD on it. wl-copy self-daemonizes, so 9>&- stops those
     # daemons from pinning the lock fd.
-    printf '%s' "$text" | wl-copy 9>&-
-    printf '%s' "$text" | wl-copy --primary 9>&-
+    if [[ "${XDG_SESSION_TYPE:-}" == x11 || ( -z "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ) ]]; then
+        if ! printf '%s' "$text" | xclip -selection clipboard 9>&- 2>>"$LOG" ||
+            ! printf '%s' "$text" | xclip -selection primary 9>&- 2>>"$LOG"; then
+            notify "Clipboard failed — see $LOG"
+            exit 1
+        fi
+        paste=(xdotool key --clearmodifiers "${WD_PASTE_KEY:-shift+Insert}")
+    else
+        if ! printf '%s' "$text" | wl-copy 9>&- 2>>"$LOG" ||
+            ! printf '%s' "$text" | wl-copy --primary 9>&- 2>>"$LOG"; then
+            notify "Clipboard failed — see $LOG"
+            exit 1
+        fi
+        # Give daemonless ydotool 0.1.8 time to register its virtual device.
+        paste=(ydotool key --delay 300 "${WD_PASTE_KEY:-shift+insert}")
+    fi
     sleep 0.2
-    # Shift+Insert is the most universal, keyboard-layout-independent
-    # paste key and the only one that also works in terminals (Ctrl+V
-    # does not). Override with WD_PASTE_KEY if ever needed.
-    # --delay 300: daemonless ydotool 0.1.8 needs the freshly-created
-    # virtual input device to be enumerated by Mutter first.
-    if ! ydotool key --delay 300 "${WD_PASTE_KEY:-shift+insert}" 2>>"$LOG"; then
+    if ! "${paste[@]}" 2>>"$LOG"; then
         notify "On clipboard — press your paste shortcut (auto-paste failed, see $LOG)"
         exit 0
     fi
