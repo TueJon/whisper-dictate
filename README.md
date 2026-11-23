@@ -1,13 +1,14 @@
 # whisper-dictate
 
 Press a keyboard shortcut, speak, press it again — your speech is transcribed
-with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and pasted
-wherever the cursor is. Built for **GNOME on Wayland** (works in terminals too).
+with Gemini, OpenAI, or [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+and pasted wherever the cursor is. Works on **GNOME with Wayland or X11**.
 
 - Toggle dictation with one shortcut (default **Ctrl+Alt+D**) — tap to start,
   tap again to stop, transcribe and paste. No push‑to‑hold.
-- German **and** English out of the box (auto-detected), model `large-v3`.
-- GPU (NVIDIA/CUDA) with automatic CPU fallback.
+- German **and** English out of the box with automatic language detection.
+- Local Whisper fallback when the selected cloud backend fails. Local inference
+  supports NVIDIA/CUDA with automatic CPU fallback.
 - Pastes via the clipboard so it is **keyboard-layout independent**
   (works with the Austrian QWERTZ layout, umlauts, etc.).
 - A **top-bar indicator** shows “● REC” / “⏳ …” while recording and
@@ -15,10 +16,11 @@ wherever the cursor is. Built for **GNOME on Wayland** (works in terminals too).
 
 ## Requirements
 
-- Linux, GNOME on Wayland (tested on Ubuntu 25.10 / GNOME 49).
+- Linux and GNOME (Wayland or X11).
 - Python 3.10+.
 - A microphone (PipeWire/PulseAudio default source is used).
-- Write access to `/dev/uinput` (for synthesizing the paste keystroke).
+- On Wayland, write access to `/dev/uinput` for the paste keystroke.
+  On X11, the installer uses `xclip` and `xdotool`.
 - For the top-bar indicator: an AppIndicator/SNI GNOME extension enabled
   (on Ubuntu `ubuntu-appindicators@ubuntu.com`; the installer enables it).
 - Optional: an NVIDIA GPU + driver for fast transcription. Without one it
@@ -36,7 +38,42 @@ cd ~/dev/whisper-dictate
 system packages (asks for sudo), creates a private venv, installs the
 scripts, pre-fetches the model, and registers the GNOME shortcut.
 
-Override the shortcut: `SHORTCUT='<Super>r' ./install.sh`.
+For a first install on a laptop without NVIDIA, use `./install.sh --cpu --no-model`.
+This uses the smaller multilingual Whisper `small` model on CPU for fallback.
+The local model is downloaded on the first local transcription. To prepare it
+ahead of going offline, omit `--no-model`. Use `./install.sh --update` to refresh
+an existing installation's scripts with its current Python environment and desktop
+settings. Run a full install if the clipboard tools for your session are missing.
+Reinstalling preserves the CPU preset. Use `--gpu` to switch back to the CUDA
+preset, or `--cpu` to switch to CPU.
+
+Override the shortcut with `SHORTCUT='<Super>r' ./install.sh`.
+
+## Enable cloud dictation
+
+Choose a provider and enter its API key at the hidden prompt on your own machine.
+
+```bash
+~/.local/bin/whisper-dictate --configure gemini   # Gemini 3.5 Transcribe
+~/.local/bin/whisper-dictate --configure openai   # OpenAI GPT-Transcribe
+~/.local/bin/whisper-dictate --configure local    # local-only
+```
+
+The choice and saved keys live in
+`${XDG_CONFIG_HOME:-$HOME/.config}/whisper-dictate/config.json` (mode 0600).
+You can also provide `GEMINI_API_KEY` or `OPENAI_API_KEY` in the environment
+of the process launching dictation. The default backend is local until you
+choose a cloud provider. For cloud dictation, the recorded clip goes to the
+selected provider. Dictation displays a notification on cloud failure before
+trying local Whisper. Gemini sends the audio inline with interaction storage
+disabled. Google’s data-use and distribution rules vary by region, including
+special provisions for the EEA, Switzerland, and the UK. See the
+[Gemini API terms](https://aistudio.google.com/docs/terms).
+
+[Gemini API pricing](https://aistudio.google.com/docs/pricing#gemini-3.5-transcribe)
+lists a free tier and an estimated paid rate of $0.005 per audio minute.
+[OpenAI API pricing](https://developers.openai.com/api/docs/pricing#transcription-models)
+lists `gpt-transcribe` at $0.0045 per audio minute.
 
 ## Usage
 
@@ -46,16 +83,18 @@ Override the shortcut: `SHORTCUT='<Super>r' ./install.sh`.
 
 ## Configuration
 
-Tunables (env vars; set them in `~/.local/bin/whisper-dictate`):
+Environment overrides for the process launching dictation:
 
 | Var | Default | Meaning |
 |---|---|---|
-| `WD_MODEL` | `large-v3` | faster-whisper model name |
-| `WD_DEVICE` | `cuda` | `cuda` or `cpu` (auto-falls back to cpu) |
-| `WD_COMPUTE` | `auto` | CT2 compute type (`auto`/`int8`/`float16`/…) |
+| `WD_BACKEND` | _(saved choice or local)_ | `gemini`, `openai`, or `local` |
+| `WD_CLOUD_TIMEOUT` | _15–120, based on clip size_ | Cloud socket timeout in seconds before falling back |
+| `WD_MODEL` | `large-v3` (`small` for `--cpu`) | faster-whisper model name |
+| `WD_DEVICE` | `cuda` (`cpu` for `--cpu`) | `cuda` or `cpu` (auto-falls back to cpu) |
+| `WD_COMPUTE` | `auto` (`int8` for `--cpu`) | CT2 compute type (`auto`/`int8`/`float16`/…) |
 | `WD_BEAM` | `1` | beam size (1 = greedy, snappy) |
-| `WD_LANG` | _(auto)_ | force a language, e.g. `de` |
-| `WD_PASTE_KEY` | `shift+insert` | ydotool key sequence used to paste |
+| `WD_LANG` | _(auto)_ | hint a language, e.g. `de` |
+| `WD_PASTE_KEY` | `shift+insert` (Wayland), `shift+Insert` (X11) | key sequence used to paste (see the active desktop tool for syntax) |
 
 ## How it works
 
@@ -64,8 +103,8 @@ Ctrl+Alt+D ──> whisper-dictate (toggle)
   press 1:  ffmpeg records the default mic -> /run/user/$UID/whisper-dictate/rec.wav
             writes state "recording"
   press 2:  stop ffmpeg -> state "transcribing" -> transcribe.py
-            (faster-whisper, GPU) -> text
-            -> wl-copy (clipboard + primary) -> ydotool Shift+Insert
+            (selected cloud service, or local faster-whisper) -> text
+            -> clipboard + primary -> Shift+Insert
             -> state "idle"  (cleared on every exit path via trap)
 
 whisper-dictate-indicator (autostarted daemon)
@@ -115,9 +154,9 @@ run's stderr is in `~/.local/share/whisper-dictate/last-run.log`.
 
 ## Latency
 
-`large-v3` is loaded on demand each use (~10–15 s: model load + CUDA init
-+ inference). For near-instant transcription, run a persistent model
-server that stays warm in VRAM (not included here).
+Cloud requests start when you stop recording. Local Whisper loads its model
+on demand (historically around 10–15 s with CUDA for `large-v3`). The
+first local run can take longer if it needs to download the model.
 
 ## Troubleshooting
 

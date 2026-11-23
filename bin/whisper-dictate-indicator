@@ -23,9 +23,12 @@ except (ValueError, ImportError):
     from gi.repository import AppIndicator3 as AppInd
 from gi.repository import GLib, Gtk
 
-RUNDIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "whisper-dictate")
+runtime = os.environ.get("XDG_RUNTIME_DIR")
+RUNDIR = os.path.join(runtime, "whisper-dictate") if runtime else f"/tmp/whisper-dictate-{os.getuid()}"
 STATE = os.path.join(RUNDIR, "state")
-os.makedirs(RUNDIR, exist_ok=True)
+os.makedirs(RUNDIR, mode=0o700, exist_ok=True)
+if os.path.islink(RUNDIR) or os.stat(RUNDIR).st_uid != os.getuid():
+    sys.exit("Whisper Dictate runtime directory is unsafe.")
 
 # Single instance — a second copy (e.g. autostart + manual) just exits.
 _lock = open(os.path.join(RUNDIR, "indicator.lock"), "w")
