@@ -16,13 +16,15 @@ esac
 
 skip_model=false
 cpu_only=false
+[[ ! -f "$WD_HOME/local-cpu" ]] || cpu_only=true
 update_only=false
 for arg in "$@"; do
     case "$arg" in
         --no-model) skip_model=true ;;
         --cpu) cpu_only=true ;;
+        --gpu) cpu_only=false ;;
         --update) update_only=true ;;
-        *) printf 'Usage: %s [--no-model] [--cpu] [--update]\n' "$0" >&2; exit 2 ;;
+        *) printf 'Usage: %s [--no-model] [--cpu|--gpu] [--update]\n' "$0" >&2; exit 2 ;;
     esac
 done
 

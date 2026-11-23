@@ -69,8 +69,11 @@ recorder_running() {
 # spawn below therefore closes fd 9 explicitly with `9>&-`.
 exec 9>"$LOCK"
 if ! flock -n 9; then
-    notify "Busy — still transcribing the previous clip."
-    exit 0
+    # Accept a stop press while the first press is launching ffmpeg.
+    if [[ "$(cat "$STATE" 2>/dev/null)" != starting ]] || ! flock -w 2 9; then
+        notify "Busy — still transcribing the previous clip."
+        exit 0
+    fi
 fi
 
 if [ -f "$PIDFILE" ]; then
@@ -148,6 +151,7 @@ if [ -f "$PIDFILE" ]; then
     notify "✓ ${text:0:80}"
 else
     # ---------- START: begin recording ----------
+    state_set starting
     rm -f "$WAV"
     # NO setsid: under job control `setsid` may fork, so $! would capture
     # the short-lived setsid PID instead of ffmpeg's and the recorder
@@ -156,7 +160,24 @@ else
     # 9>&- so ffmpeg does not inherit (and pin) the lock fd.
     ffmpeg -hide_banner -loglevel error -nostdin \
         -f pulse -i default -ac 1 -ar 16000 "$WAV" </dev/null >/dev/null 2>&1 9>&- &
-    echo $! > "$PIDFILE"
-    state_set recording
-    play "$SND/bell.oga"
+    rec_pid=$!
+    # Keep the toggle lock until ffmpeg has exec'd. Before that, the
+    # PID is our shell child but cannot be identified by recorder_running.
+    for _ in {1..100}; do
+        if recorder_running "$rec_pid"; then
+            printf '%s\n' "$rec_pid" > "$PIDFILE"
+            state_set recording
+            play "$SND/bell.oga"
+            exit 0
+        fi
+        [[ "$(jobs -pr)" == "$rec_pid" ]] || break
+        sleep 0.01
+    done
+    if [[ "$(jobs -pr)" == "$rec_pid" ]]; then
+        kill -KILL "$rec_pid" 2>/dev/null || true
+    fi
+    wait "$rec_pid" 2>/dev/null || true
+    rm -f "$WAV"
+    state_set idle
+    notify "Recorder failed to start."
 fi
