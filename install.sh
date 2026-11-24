@@ -87,7 +87,7 @@ mkdir -p "$WD_HOME" "$BIN_DIR"
 "$WD_HOME/venv/bin/pip" install -q -U pip wheel
 if "$cpu_only"; then
     say "Installing faster-whisper for CPU"
-    "$WD_HOME/venv/bin/pip" install -q faster-whisper
+    "$WD_HOME/venv/bin/pip" install -q -r "$REPO_DIR/requirements-cpu.txt"
     touch "$WD_HOME/local-cpu"
     export WD_MODEL="${WD_MODEL:-small}"
     export WD_DEVICE="${WD_DEVICE:-cpu}"

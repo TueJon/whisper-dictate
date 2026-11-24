@@ -43,7 +43,8 @@ This uses the smaller multilingual Whisper `small` model on CPU for fallback.
 The local model is downloaded on the first local transcription. To prepare it
 ahead of going offline, omit `--no-model`. Use `./install.sh --update` to refresh
 an existing installation's scripts with its current Python environment and desktop
-settings. Run a full install if the clipboard tools for your session are missing.
+settings. Run a full install if the clipboard tools for your session are missing
+or to refresh the Python dependencies.
 Reinstalling preserves the CPU preset. Use `--gpu` to switch back to the CUDA
 preset, or `--cpu` to switch to CPU.
 
